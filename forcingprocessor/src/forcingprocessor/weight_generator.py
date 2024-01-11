@@ -1,51 +1,54 @@
 import geopandas as gpd
 import numpy as np
 import xarray as xr
-from rasterio.features import rasterize, bounds
-import json, argparse, os
-from pathlib import Path
-from math import floor, ceil
+import rasterio
+from rasterio.features import rasterize, geometry_window, bounds
+import json, argparse
 import datetime
 import multiprocessing
 from functools import partial
 
-def process_row(row, grid):
-    # Your existing row processing code here
+def process_row(row, src_string, y_extent):
+    src = rasterio.open(src_string)
+    window = geometry_window(src, [row['geometry']])
+    row_offset, col_offset = window.row_off, window.col_off
+    # Rasterize within the window
     geom_rasterize = rasterize(
         [(row["geometry"], 1)],
-        out_shape=grid.rio.shape,
-        transform=grid.rio.transform(),
+        out_shape=(window.height, window.width),
+        transform=src.window_transform(window),
         all_touched=True,
-        fill=0, 
-        dtype="uint8",
+        fill=0,
+        dtype="uint8"
     )
-    # numpy.where runs slowly on large arrays
-    # so we slice off the empty space
-    y_min, x_max, y_max, x_min = bounds(row["geometry"], transform=~grid.rio.transform())
-    x_min = floor(x_min)
-    x_max = ceil(x_max)
-    y_min = floor(y_min)
-    y_max = ceil(y_max)
-    geom_rasterize = geom_rasterize[x_min:x_max, y_min:y_max]
-    localized_coords = np.where(geom_rasterize == 1)
-    global_coords = (localized_coords[0] + x_min, localized_coords[1] + y_min)
 
+    # Adjust local coordinates to global coordinates
+    global_positions = np.where(geom_rasterize == 1)
+    #print(global_positions)
+    global_rows = global_positions[0] + row_offset
+    global_cols = global_positions[1] + col_offset
+    # transform matrix has y inverted when loaded with rasterio
+    global_rows = y_extent - global_rows
+    global_coords = (global_rows, global_cols)
     return (row["divide_id"], global_coords)
 
-def generate_weights_file(geopackage,grid_file,weights_filepath):
-
+def generate_weights_file(geopackage, grid_file, weights_filepath):
     try:
-        ds = xr.open_dataset(grid_file,engine='h5netcdf')
+        src_string = f"netcdf:{grid_file}:RAINRATE"
+        src = rasterio.open(src_string)
+        ds = xr.open_dataset(grid_file,engine='netcdf4')
         grid = ds['RAINRATE']
-    except:
-        raise Exception(f'\n\nThere\'s a problem with {example_grid_filepath}!\n')
+    except Exception as e:
+        raise Exception(f'\n\nError opening {grid_file}: {e}\n')
 
     g_df = gpd.read_file(geopackage, layer='divides')
-    gdf_proj = g_df.to_crs('PROJCS["Lambert_Conformal_Conic",GEOGCS["GCS_Sphere",DATUM["D_Sphere",SPHEROID["Sphere",6370000.0,0.0]], \
-PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Lambert_Conformal_Conic_2SP"],PARAMETER["false_easting",0.0],\
-PARAMETER["false_northing",0.0],PARAMETER["central_meridian",-97.0],PARAMETER["standard_parallel_1",30.0],\
-PARAMETER["standard_parallel_2",60.0],PARAMETER["latitude_of_origin",40.0],UNIT["Meter",1.0]]')
-
+    gdf_proj = g_df.to_crs(src.crs.to_string())
+    # check transforms 
+    print(src.transform)
+    print(grid.rio.transform())
+    # get the shape of the grid
+    y_extent = grid.rio.shape[0]
+    print(y_extent)
     crosswalk_dict = {}
     start_time = datetime.datetime.now()
     print(f'Starting at {start_time}')
@@ -53,7 +56,7 @@ PARAMETER["standard_parallel_2",60.0],PARAMETER["latitude_of_origin",40.0],UNIT[
     # Create a multiprocessing pool
     with multiprocessing.Pool() as pool:
         # Use a partial function to pass the constant 'grid' argument
-        func = partial(process_row, grid=grid)
+        func = partial(process_row, src_string=src_string, y_extent=y_extent)
         # Map the function across all rows
         results = pool.map(func, rows)
 
@@ -71,15 +74,9 @@ PARAMETER["standard_parallel_2",60.0],PARAMETER["latitude_of_origin",40.0],UNIT[
         f.write(weights_json)
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-    parser.add_argument(dest="geopackage", type=str, help="Path to geopackage file")
-    parser.add_argument(dest="weights_filename", type=str, help="Filename for the weight file")
-    example_grid_filepath = Path(Path(Path(os.path.dirname(__file__)).parent,'data/'),'nwm_example_grid_file.nc')
-    if not example_grid_filepath.exists(): 
-        print(f'{example_grid_filepath} doesn\'t exist, using user\'s input')
-        parser.add_argument(dest="example_grid_filepath", type=str, help="Example NWM forcing file")        
+    parser.add_argument("geopackage", type=str, help="Path to geopackage file")
+    parser.add_argument("weights_filename", type=str, help="Filename for the weight file")
+    parser.add_argument("grid_file", type=str, help="Path to grid file")
     args = parser.parse_args()   
-    if 'example_grid_filepath' in args: example_grid_filepath = args.example_grid_filepath 
-
-    generate_weights_file(args.geopackage, example_grid_filepath, args.weights_filename)
+    generate_weights_file(args.geopackage, args.grid_file, args.weights_filename)
