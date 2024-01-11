@@ -8,8 +8,9 @@ import datetime
 import multiprocessing
 from functools import partial
 
-def process_row(row, src_string, y_extent):
+def process_row(row, src_string):
     src = rasterio.open(src_string)
+    y_extent = src.shape[0]
     window = geometry_window(src, [row['geometry']])
     row_offset, col_offset = window.row_off, window.col_off
     # Rasterize within the window
@@ -21,50 +22,38 @@ def process_row(row, src_string, y_extent):
         fill=0,
         dtype="uint8"
     )
+    # flip the raster as rasterio reads from top to bottom
     geom_rasterize = np.flipud(geom_rasterize)
-    # Adjust local coordinates to global coordinates
     global_positions = np.where(geom_rasterize == 1)
-
-    #print(global_positions)
+    # flip the y offset as we flipped the raster
     global_rows = global_positions[0] + (y_extent - row_offset)
     global_cols = global_positions[1] + col_offset
-
     global_coords = (global_rows, global_cols)
+
     return (row["divide_id"], global_coords)
 
 def generate_weights_file(geopackage, grid_file, weights_filepath):
     try:
         src_string = f"netcdf:{grid_file}:RAINRATE"
         src = rasterio.open(src_string)
-        ds = xr.open_dataset(grid_file,engine='netcdf4')
-        grid = ds['RAINRATE']
     except Exception as e:
         raise Exception(f'\n\nError opening {grid_file}: {e}\n')
 
-    g_df = gpd.read_file(geopackage, layer='divides')
+    g_df = gpd.read_file(geopackage, layer='divides', engine='pyogrio')
     gdf_proj = g_df.to_crs(src.crs.to_string())
-    # check transforms 
-    print(src.transform)
-    print(src.shape)
-    print(grid.rio.transform())
-    print(grid.rio.shape)
-    # get the shape of the grid
-    y_extent = grid.rio.shape[0]
     crosswalk_dict = {}
     start_time = datetime.datetime.now()
     print(f'Starting at {start_time}')
     rows = [row for _, row in gdf_proj.iterrows()]
     # Create a multiprocessing pool
     with multiprocessing.Pool() as pool:
-        # Use a partial function to pass the constant 'grid' argument
-        func = partial(process_row, src_string=src_string, y_extent=y_extent)
-        # Map the function across all rows
+        # Use a partial function to pass the constant 'src_string' argument
+        func = partial(process_row, src_string=src_string)
         results = pool.map(func, rows)
 
     # Aggregate results
     for divide_id, global_coords in results:
         crosswalk_dict[divide_id] = global_coords
-
 
     weights_json = json.dumps(
         {k: [x.tolist() for x in v] for k, v in crosswalk_dict.items()}
