@@ -21,14 +21,14 @@ def process_row(row, src_string, y_extent):
         fill=0,
         dtype="uint8"
     )
-
+    geom_rasterize = np.flipud(geom_rasterize)
     # Adjust local coordinates to global coordinates
     global_positions = np.where(geom_rasterize == 1)
+
     #print(global_positions)
-    global_rows = global_positions[0] + row_offset
+    global_rows = global_positions[0] + (y_extent - row_offset)
     global_cols = global_positions[1] + col_offset
-    # transform matrix has y inverted when loaded with rasterio
-    global_rows = y_extent - global_rows
+
     global_coords = (global_rows, global_cols)
     return (row["divide_id"], global_coords)
 
@@ -45,10 +45,11 @@ def generate_weights_file(geopackage, grid_file, weights_filepath):
     gdf_proj = g_df.to_crs(src.crs.to_string())
     # check transforms 
     print(src.transform)
+    print(src.shape)
     print(grid.rio.transform())
+    print(grid.rio.shape)
     # get the shape of the grid
     y_extent = grid.rio.shape[0]
-    print(y_extent)
     crosswalk_dict = {}
     start_time = datetime.datetime.now()
     print(f'Starting at {start_time}')
